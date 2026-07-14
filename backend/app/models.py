@@ -74,6 +74,12 @@ class UsersPublic(SQLModel):
 class ItemBase(SQLModel):
     title: str = Field(min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=255)
+    priority: int | None = Field(
+        default=None,
+        ge=1,
+        le=5,
+        description="Triage priority from 1 (highest) to 5 (lowest). Introduced to support the upcoming triage workflow.",
+    )
 
 
 # Properties to receive on item creation

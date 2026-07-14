@@ -1,0 +1,75 @@
+name: Docs CI
+
+# This repo has no static OpenAPI file to diff: the spec is generated at
+# runtime by FastAPI from the Pydantic/SQLModel models. So instead of
+# git-diffing a checked-in YAML like the other three repos in this
+# pipeline, this workflow starts the backend, fetches the live spec from
+# http://localhost:8000/api/v1/openapi.json, and diffs that fetch against
+# a JSON snapshot checked into docs/openapi-snapshot.json. After drafting,
+# it updates the snapshot so the next run diffs against this one.
+
+on:
+  pull_request:
+    paths:
+      - "backend/app/models.py"
+      - "backend/app/api/**"
+      - "docs/**"
+
+jobs:
+  lint-spec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up -d db backend
+      - name: Wait for backend
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/api/v1/openapi.json -o /tmp/live-spec.json && break
+            sleep 2
+          done
+      - run: npx @stoplight/spectral-cli lint /tmp/live-spec.json --ruleset tooling/.spectral.yaml
+
+  lint-prose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: errata-ai/vale-action@v2
+        with:
+          files: docs
+          styles: tooling/styles
+
+  draft-docs-from-spec-change:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up -d db backend
+      - name: Wait for backend
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/api/v1/openapi.json -o /dev/null && break
+            sleep 2
+          done
+      - name: Fetch current spec (pretty-printed for a meaningful line diff)
+        run: curl -s http://localhost:8000/api/v1/openapi.json | python3 -m json.tool > /tmp/new-spec.json
+      - name: Draft docs update
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python3 tooling/scripts/draft_docs_from_diff.py \
+            --old-spec docs/openapi-snapshot.json \
+            --new-spec /tmp/new-spec.json \
+            --doc docs/items.md \
+            --out docs/items.md \
+            --product-name "Full Stack FastAPI Template"
+      - name: Update the baseline snapshot for next time
+        run: cp /tmp/new-spec.json docs/openapi-snapshot.json
+      - uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "docs: draft update from spec change"
+          title: "[auto-draft] Update docs for spec change"
+          body: "Opened automatically from a live spec diff (fetched from the running backend, not a git diff of a spec file). Needs human review before merge."
+          branch: auto/docs-draft
+          add-paths: |
+            docs/items.md
+            docs/openapi-snapshot.json
