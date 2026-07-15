@@ -22,10 +22,12 @@ on:
       - "docs/**"
 
 jobs:
-  lint-spec:
+  # One job for both linters: each extra job pays its own runner spin-up and
+  # checkout, and these finish in seconds once the backend is up.
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker compose up -d db backend
       - name: Wait for backend
         run: |
@@ -33,22 +35,26 @@ jobs:
             curl -sf http://localhost:8000/api/v1/openapi.json -o /tmp/live-spec.json && break
             sleep 2
           done
-      - run: npx @stoplight/spectral-cli lint /tmp/live-spec.json --ruleset tooling/.spectral.yaml
-
-  lint-prose:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: errata-ai/vale-action@v2
-        with:
-          files: docs
-          styles: tooling/styles
+      - run: npx --yes @stoplight/spectral-cli@6.16.1 lint /tmp/live-spec.json --ruleset tooling/.spectral.yaml
+      # Run Vale directly (pinned) instead of the reviewdog-based action: it
+      # avoids the action's PR-only reporter and resolves StylesPath relative to
+      # the ruleset. StylesPath in tooling/.vale.ini points at tooling/styles.
+      - name: Vale prose lint
+        run: |
+          curl -sSfL https://github.com/errata-ai/vale/releases/download/v3.15.1/vale_3.15.1_Linux_64-bit.tar.gz \
+            | tar -xz vale
+          ./vale --config=tooling/.vale.ini docs
 
   draft-docs-from-spec-change:
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    # create-pull-request needs write to push the draft branch and open the PR;
+    # the default GITHUB_TOKEN is read-only.
+    permissions:
+      contents: write
+      pull-requests: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker compose up -d db backend
       - name: Wait for backend
         run: |
@@ -62,6 +68,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
+          pip install anthropic  # optional for the script; gives SDK retries/timeouts in CI
           python3 tooling/scripts/draft_docs_from_diff.py \
             --old-spec docs/openapi-snapshot.json \
             --new-spec /tmp/new-spec.json \
@@ -70,7 +77,7 @@ jobs:
             --product-name "Full Stack FastAPI Template"
       - name: Update the baseline snapshot for next time
         run: cp /tmp/new-spec.json docs/openapi-snapshot.json
-      - uses: peter-evans/create-pull-request@v6
+      - uses: peter-evans/create-pull-request@v8
         with:
           commit-message: "docs: draft update from spec change"
           title: "[auto-draft] Update docs for spec change"
